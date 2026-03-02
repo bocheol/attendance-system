@@ -11,24 +11,27 @@ st.title("🏫 2학년 6반 출결 보고 시스템")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 2. 학생 명단 및 비밀번호 불러오기
-# '학생명단'이라는 이름의 워크시트에서 데이터를 읽어옵니다.
 try:
-    student_df = conn.read(worksheet="학생명단")
-    # 학번을 키로, 비밀번호를 값으로 하는 딕셔너리 생성
-    student_db = dict(zip(student_df['학번'].astype(str), student_df['비밀번호'].astype(str)))
-    # 학번을 키로, 이름을 값으로 하는 딕셔너리 생성 (자동 입력용)
-    name_db = dict(zip(student_df['학번'].astype(str), student_df['이름'].astype(str)))
-except:
-    st.error("구글 시트에서 '학생명단' 시트를 찾을 수 없습니다.")
+    # '학생명단' 워크시트에서 데이터 읽기 (ttl=0으로 설정하여 캐시 없이 실시간 반영)
+    student_df = conn.read(worksheet="학생명단", ttl=0)
+    # 데이터 타입 통일 (문자열로 비교해야 오류가 없습니다)
+    student_df['학번'] = student_df['학번'].astype(str)
+    student_df['비밀번호'] = student_df['비밀번호'].astype(str)
+    
+    student_db = dict(zip(student_df['학번'], student_df['비밀번호']))
+    name_db = dict(zip(student_df['학번'], student_df['이름']))
+except Exception as e:
+    st.error(f"시트 연결 오류: '학생명단' 탭과 헤더(학번, 이름, 비밀번호)를 확인해주세요. ({e})")
     student_db = {}
 
+# 로그인 상태 관리
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
 if not st.session_state.logged_in:
     with st.form("login_form"):
         st.subheader("로그인")
-        user_id = st.text_input("학번 (5자리)", placeholder="20601")
+        user_id = st.text_input("학번 (5자리)", placeholder="예: 20601")
         password = st.text_input("비밀번호", type="password")
         login_btn = st.form_submit_button("로그인")
         
@@ -36,38 +39,38 @@ if not st.session_state.logged_in:
             if user_id in student_db and student_db[user_id] == password:
                 st.session_state.logged_in = True
                 st.session_state.user_id = user_id
-                st.session_state.user_name = name_db.get(user_id, "")
+                st.session_state.user_name = name_db.get(user_id, "학생")
                 st.rerun()
             else:
                 st.error("학번 또는 비밀번호가 틀렸습니다.")
 else:
     # 3. 출결 입력 화면
-    st.info(f"접속: {st.session_state.user_id} {st.session_state.user_name}")
+    st.success(f"✅ {st.session_state.user_id} {st.session_state.user_name} 학생 환영합니다.")
     
     with st.form("attendance_form"):
-        st.subheader("출결 정보 입력")
+        st.subheader("출결 보고 작성")
         
         today = datetime.now().date()
         date_val = st.date_input("날짜", value=today)
         
-        # 이름은 로그인 정보를 바탕으로 자동 입력
+        # 이름은 시트에서 가져온 데이터로 고정 (수정 가능하게 둠)
         user_name = st.text_input("이름", value=st.session_state.user_name)
         
+        # 출결 종류 및 사유 (선생님 요청사항 반영)
         status = st.radio("출결 종류", ["지각", "조퇴", "결석", "결과"], horizontal=True)
         reason_type = st.selectbox("출결 사유", ["미인정", "병결", "기타", "인정"])
         
         all_periods = [f"{i}교시" for i in range(1, 8)]
-        if status == "결석":
-            periods = st.multiselect("교시 선택", all_periods, default=all_periods)
-        else:
-            periods = st.multiselect("교시 선택", all_periods)
+        # '결석'일 경우 자동으로 1~7교시 전체 선택
+        default_periods = all_periods if status == "결석" else []
+        periods = st.multiselect("교시 선택", all_periods, default=default_periods)
             
-        specific_reason = st.text_area("상세 사유")
+        specific_reason = st.text_area("상세 사유", placeholder="사유를 자세히 적어주세요.")
         
-        submit_btn = st.form_submit_button("전송하기")
+        submit_btn = st.form_submit_button("선생님께 전송하기")
         
         if submit_btn:
-            # 첫 번째 시트(출결데이터)에 저장 (worksheet를 명시하지 않으면 첫 번째 시트에 저장됨)
+            # 시트1에 저장할 데이터 구성
             new_data = pd.DataFrame([{
                 "날짜": date_val.strftime("%Y-%m-%d"),
                 "학번": st.session_state.user_id,
@@ -79,12 +82,14 @@ else:
             }])
             
             try:
-                existing_data = conn.read(worksheet="시트1") # 출결 데이터가 쌓이는 시트 이름 확인 필요
+                # [시트1]에 기존 데이터 읽기 및 새 데이터 추가
+                existing_data = conn.read(worksheet="시트1", ttl=0)
                 updated_df = pd.concat([existing_data, new_data], ignore_index=True)
                 conn.update(worksheet="시트1", data=updated_df)
-                st.success("선생님께 전송되었습니다!")
-            except:
-                st.error("데이터 저장 시트 이름을 확인해 주세요.")
+                st.balloons()
+                st.success("보고가 완료되었습니다! 창을 닫으셔도 됩니다.")
+            except Exception as e:
+                st.error(f"데이터 전송 실패: '시트1' 탭의 헤더를 확인해주세요. ({e})")
             
     if st.button("로그아웃"):
         st.session_state.logged_in = False
